@@ -23,17 +23,12 @@ YTDL_OPTS = {
     "sleep_interval": 1,
     "max_sleep_interval": 5,
     "concurrent_fragment_downloads": 1,
-    "extractor_args": {
-        "youtube": {
-            "player_client": ["android", "web_embedded"]
-        }
-    },
+    "extractor_args": {"youtube": {"player_client": ["android"]}},
     "http_headers": {
         "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
         "Accept-Language": "en-US,en;q=0.9"
     }
 }
-
 
 FFMPEG_BEFORE_OPTS = "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5"
 FFMPEG_OPTS = "-vn"
