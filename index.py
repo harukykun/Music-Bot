@@ -23,7 +23,7 @@ YTDL_OPTS = {
     "sleep_interval": 1,
     "max_sleep_interval": 5,
     "concurrent_fragment_downloads": 1,
-    "cookiefile": "cookies.txt", 
+    "cookiefile":"/home/mashiro1610/Music-Bot/cookies.txt",
     "extractor_args": {"youtube": {"player_client": ["ios"]}}, 
     "http_headers": {
         "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.5 Mobile/15E148 Safari/604.1",
