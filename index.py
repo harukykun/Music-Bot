@@ -23,9 +23,10 @@ YTDL_OPTS = {
     "sleep_interval": 1,
     "max_sleep_interval": 5,
     "concurrent_fragment_downloads": 1,
-    "extractor_args": {"youtube": {"player_client": ["android"]}},
+    # Thay đổi 'android' thành 'ios' hoặc 'web_creator'
+    "extractor_args": {"youtube": {"player_client": ["ios"]}}, 
     "http_headers": {
-        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+        "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.5 Mobile/15E148 Safari/604.1",
         "Accept-Language": "en-US,en;q=0.9"
     }
 }
