@@ -76,7 +76,6 @@ class MusicPlayer:
             self.guild.voice_client.play(self.current, after=self.play_next_event)
             await self.channel.send(embed=self.build_embed(), view=ControlView(self))
         except Exception as e:
-            await self.channel.send(f"Lỗi khi phát bài: {track_data['title']}")
             self.play_next_event(None)
 
     def play_next_event(self, error):
@@ -173,7 +172,5 @@ async def play(interaction: discord.Interaction, search: str):
     if not interaction.guild.voice_client.is_playing() and not interaction.guild.voice_client.is_paused():
         player.index += 1
         await player.play_current()
-        await interaction.followup.send(f"Đang phát: **{data.get('title')}**")
-
 token = os.getenv("DISCORD_TOKEN")
 bot.run(token)
