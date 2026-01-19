@@ -66,31 +66,50 @@ def extract_video_id(url_or_search):
             return match.group(1)
     return None
 
-async def get_audio_from_cobalt(video_id):
-    async with aiohttp.ClientSession() as session:
-        try:
-            headers = {
-                "Accept": "application/json",
-                "Content-Type": "application/json"
-            }
-            payload = {
-                "url": f"https://www.youtube.com/watch?v={video_id}",
-                "downloadMode": "audio",
-                "audioFormat": "best"
-            }
-            async with session.post(COBALT_API, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=15)) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    if data.get("status") == "tunnel" or data.get("status") == "redirect":
-                        return {
-                            "url": data.get("url"),
-                            "title": "YouTube Audio",
-                            "duration": 0,
-                            "thumbnail": f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg",
-                            "webpage_url": f"https://www.youtube.com/watch?v={video_id}"
-                        }
-        except Exception as e:
-            print(f"Cobalt error: {e}")
+async def get_audio_from_ytdlp(url_or_id, loop):
+    try:
+        ytdl_opts = {
+            "format": "bestaudio/best",
+            "noplaylist": True,
+            "nocheckcertificate": True,
+            "quiet": True,
+            "no_warnings": True,
+            "extract_flat": False,
+            "extractor_args": {
+                "youtube": {
+                    "player_client": ["ios", "android"],
+                }
+            },
+        }
+        with yt_dlp.YoutubeDL(ytdl_opts) as ydl:
+            if len(url_or_id) == 11:
+                url = f"https://www.youtube.com/watch?v={url_or_id}"
+            else:
+                url = url_or_id
+            print(f"Trying yt-dlp with iOS/Android client: {url}")
+            data = await loop.run_in_executor(None, lambda: ydl.extract_info(url, download=False))
+            if data:
+                formats = data.get("formats", [])
+                audio_formats = [f for f in formats if f.get("acodec") != "none" and f.get("vcodec") == "none"]
+                if audio_formats:
+                    best = max(audio_formats, key=lambda x: x.get("abr", 0) or 0)
+                    return {
+                        "url": best.get("url"),
+                        "title": data.get("title", "Unknown"),
+                        "duration": data.get("duration", 0),
+                        "thumbnail": data.get("thumbnail"),
+                        "webpage_url": data.get("webpage_url")
+                    }
+                elif data.get("url"):
+                    return {
+                        "url": data.get("url"),
+                        "title": data.get("title", "Unknown"),
+                        "duration": data.get("duration", 0),
+                        "thumbnail": data.get("thumbnail"),
+                        "webpage_url": data.get("webpage_url")
+                    }
+    except Exception as e:
+        print(f"yt-dlp error: {e}")
     return None
 
 async def get_audio_from_piped(video_id):
@@ -222,7 +241,7 @@ class MusicPlayer:
                 if not data:
                     data = await get_audio_from_invidious(video_id)
                 if not data:
-                    data = await get_audio_from_cobalt(video_id)
+                    data = await get_audio_from_ytdlp(video_id, self.bot.loop)
                 if data:
                     audio_url = data.get("url")
                     track_data["url"] = audio_url
@@ -358,10 +377,13 @@ async def on_ready():
 @bot.tree.command(name="play", description="Phát nhạc từ YouTube")
 @app_commands.describe(search="Tên bài hát hoặc URL YouTube")
 async def play(interaction: discord.Interaction, search: str):
+    try:
+        await interaction.response.defer()
+    except discord.errors.NotFound:
+        return
+    
     if not interaction.user.voice:
-        return await interaction.response.send_message("❌ Vào Voice Channel trước nhé!", ephemeral=True)
-
-    await interaction.response.defer()
+        return await interaction.followup.send("❌ Vào Voice Channel trước nhé!")
     
     try:
         if not interaction.guild.voice_client:
@@ -390,8 +412,8 @@ async def play(interaction: discord.Interaction, search: str):
             data = await get_audio_from_invidious(video_id)
         
         if not data:
-            print("Invidious failed, trying Cobalt...")
-            data = await get_audio_from_cobalt(video_id)
+            print("Invidious failed, trying yt-dlp...")
+            data = await get_audio_from_ytdlp(video_id, bot.loop)
         
         if not data or not data.get("url"):
             return await interaction.followup.send("❌ Không thể lấy audio từ video này!")
@@ -415,7 +437,10 @@ async def play(interaction: discord.Interaction, search: str):
             await player.play_current()
             
     except Exception as e:
-        await interaction.followup.send(f"❌ Lỗi: {str(e)}")
+        try:
+            await interaction.followup.send(f"❌ Lỗi: {str(e)}")
+        except:
+            print(f"Error: {e}")
 
 @bot.tree.command(name="skip", description="Bỏ qua bài hát hiện tại")
 async def skip(interaction: discord.Interaction):
