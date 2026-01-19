@@ -11,18 +11,21 @@ from dotenv import load_dotenv
 load_dotenv()
 
 INVIDIOUS_INSTANCES = [
-    "https://invidious.fdn.fr",
     "https://inv.nadeko.net",
     "https://invidious.nerdvpn.de",
+    "https://invidious.private.coffee",
+    "https://yt.drgnz.club",
     "https://invidious.protokolla.fi",
-    "https://iv.ggtyler.dev",
 ]
 
 PIPED_INSTANCES = [
+    "https://api.piped.private.coffee",
     "https://pipedapi.kavin.rocks",
-    "https://pipedapi.adminforge.de",
-    "https://api.piped.yt",
+    "https://pipedapi.r4fo.com",
+    "https://pipedapi.darkness.services",
 ]
+
+COBALT_API = "https://api.cobalt.tools"
 
 YTDL_OPTIONS = {
     "format": "bestaudio/best",
@@ -42,7 +45,7 @@ YTDL_OPTIONS = {
 }
 
 FFMPEG_OPTIONS = {
-    "before_options": "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5",
+    "before_options": "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -headers 'User-Agent: Mozilla/5.0'",
     "options": "-vn",
 }
 
@@ -63,11 +66,40 @@ def extract_video_id(url_or_search):
             return match.group(1)
     return None
 
+async def get_audio_from_cobalt(video_id):
+    async with aiohttp.ClientSession() as session:
+        try:
+            headers = {
+                "Accept": "application/json",
+                "Content-Type": "application/json"
+            }
+            payload = {
+                "url": f"https://www.youtube.com/watch?v={video_id}",
+                "downloadMode": "audio",
+                "audioFormat": "best"
+            }
+            async with session.post(COBALT_API, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    if data.get("status") == "tunnel" or data.get("status") == "redirect":
+                        return {
+                            "url": data.get("url"),
+                            "title": "YouTube Audio",
+                            "duration": 0,
+                            "thumbnail": f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg",
+                            "webpage_url": f"https://www.youtube.com/watch?v={video_id}"
+                        }
+        except Exception as e:
+            print(f"Cobalt error: {e}")
+    return None
+
 async def get_audio_from_piped(video_id):
     async with aiohttp.ClientSession() as session:
         for instance in PIPED_INSTANCES:
             try:
-                async with session.get(f"{instance}/streams/{video_id}", timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                print(f"Trying Piped: {instance}")
+                async with session.get(f"{instance}/streams/{video_id}", timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                    print(f"Piped {instance} status: {resp.status}")
                     if resp.status == 200:
                         data = await resp.json()
                         audio_streams = data.get("audioStreams", [])
@@ -80,7 +112,8 @@ async def get_audio_from_piped(video_id):
                                 "thumbnail": data.get("thumbnailUrl"),
                                 "webpage_url": f"https://www.youtube.com/watch?v={video_id}"
                             }
-            except:
+            except Exception as e:
+                print(f"Piped {instance} error: {e}")
                 continue
     return None
 
@@ -88,7 +121,9 @@ async def get_audio_from_invidious(video_id):
     async with aiohttp.ClientSession() as session:
         for instance in INVIDIOUS_INSTANCES:
             try:
-                async with session.get(f"{instance}/api/v1/videos/{video_id}", timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                print(f"Trying Invidious: {instance}")
+                async with session.get(f"{instance}/api/v1/videos/{video_id}", timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                    print(f"Invidious {instance} status: {resp.status}")
                     if resp.status == 200:
                         data = await resp.json()
                         adaptive = data.get("adaptiveFormats", [])
@@ -102,7 +137,8 @@ async def get_audio_from_invidious(video_id):
                                 "thumbnail": data.get("videoThumbnails", [{}])[0].get("url"),
                                 "webpage_url": f"https://www.youtube.com/watch?v={video_id}"
                             }
-            except:
+            except Exception as e:
+                print(f"Invidious {instance} error: {e}")
                 continue
     return None
 
@@ -110,7 +146,7 @@ async def search_youtube_piped(query):
     async with aiohttp.ClientSession() as session:
         for instance in PIPED_INSTANCES:
             try:
-                async with session.get(f"{instance}/search", params={"q": query, "filter": "videos"}, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                async with session.get(f"{instance}/search", params={"q": query, "filter": "videos"}, timeout=aiohttp.ClientTimeout(total=15)) as resp:
                     if resp.status == 200:
                         data = await resp.json()
                         items = data.get("items", [])
@@ -118,7 +154,8 @@ async def search_youtube_piped(query):
                             video = items[0]
                             video_id = video.get("url", "").replace("/watch?v=", "")
                             return video_id
-            except:
+            except Exception as e:
+                print(f"Search {instance} error: {e}")
                 continue
     return None
 
@@ -184,6 +221,8 @@ class MusicPlayer:
                 data = await get_audio_from_piped(video_id)
                 if not data:
                     data = await get_audio_from_invidious(video_id)
+                if not data:
+                    data = await get_audio_from_cobalt(video_id)
                 if data:
                     audio_url = data.get("url")
                     track_data["url"] = audio_url
@@ -342,10 +381,17 @@ async def play(interaction: discord.Interaction, search: str):
         if not video_id:
             return await interaction.followup.send("❌ Không tìm thấy bài hát!")
         
+        print(f"Found video_id: {video_id}")
+        
         data = await get_audio_from_piped(video_id)
         
         if not data:
+            print("Piped failed, trying Invidious...")
             data = await get_audio_from_invidious(video_id)
+        
+        if not data:
+            print("Invidious failed, trying Cobalt...")
+            data = await get_audio_from_cobalt(video_id)
         
         if not data or not data.get("url"):
             return await interaction.followup.send("❌ Không thể lấy audio từ video này!")
