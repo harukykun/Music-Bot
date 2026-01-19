@@ -1,5 +1,7 @@
 import os
 import asyncio
+import aiohttp
+import re
 import discord
 import yt_dlp
 from discord import app_commands
@@ -7,6 +9,20 @@ from discord.ext import commands
 from dotenv import load_dotenv
 
 load_dotenv()
+
+INVIDIOUS_INSTANCES = [
+    "https://invidious.fdn.fr",
+    "https://inv.nadeko.net",
+    "https://invidious.nerdvpn.de",
+    "https://invidious.protokolla.fi",
+    "https://iv.ggtyler.dev",
+]
+
+PIPED_INSTANCES = [
+    "https://pipedapi.kavin.rocks",
+    "https://pipedapi.adminforge.de",
+    "https://api.piped.yt",
+]
 
 YTDL_OPTIONS = {
     "format": "bestaudio/best",
@@ -22,9 +38,6 @@ YTDL_OPTIONS = {
     "no_warnings": True,
     "default_search": "ytsearch",
     "source_address": "0.0.0.0",
-    "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "referer": "https://www.google.com/",
-    "cookiefile": None,
     "extract_flat": False,
 }
 
@@ -38,6 +51,76 @@ if not os.path.exists(FFMPEG_PATH):
     FFMPEG_PATH = "ffmpeg"
 
 ytdl = yt_dlp.YoutubeDL(YTDL_OPTIONS)
+
+def extract_video_id(url_or_search):
+    patterns = [
+        r'(?:youtube\.com/watch\?v=|youtu\.be/|youtube\.com/shorts/)([a-zA-Z0-9_-]{11})',
+        r'^([a-zA-Z0-9_-]{11})$'
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, url_or_search)
+        if match:
+            return match.group(1)
+    return None
+
+async def get_audio_from_piped(video_id):
+    async with aiohttp.ClientSession() as session:
+        for instance in PIPED_INSTANCES:
+            try:
+                async with session.get(f"{instance}/streams/{video_id}", timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        audio_streams = data.get("audioStreams", [])
+                        if audio_streams:
+                            best_audio = max(audio_streams, key=lambda x: x.get("bitrate", 0))
+                            return {
+                                "url": best_audio.get("url"),
+                                "title": data.get("title", "Unknown"),
+                                "duration": data.get("duration", 0),
+                                "thumbnail": data.get("thumbnailUrl"),
+                                "webpage_url": f"https://www.youtube.com/watch?v={video_id}"
+                            }
+            except:
+                continue
+    return None
+
+async def get_audio_from_invidious(video_id):
+    async with aiohttp.ClientSession() as session:
+        for instance in INVIDIOUS_INSTANCES:
+            try:
+                async with session.get(f"{instance}/api/v1/videos/{video_id}", timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        adaptive = data.get("adaptiveFormats", [])
+                        audio_formats = [f for f in adaptive if f.get("type", "").startswith("audio/")]
+                        if audio_formats:
+                            best_audio = max(audio_formats, key=lambda x: x.get("bitrate", 0))
+                            return {
+                                "url": best_audio.get("url"),
+                                "title": data.get("title", "Unknown"),
+                                "duration": data.get("lengthSeconds", 0),
+                                "thumbnail": data.get("videoThumbnails", [{}])[0].get("url"),
+                                "webpage_url": f"https://www.youtube.com/watch?v={video_id}"
+                            }
+            except:
+                continue
+    return None
+
+async def search_youtube_piped(query):
+    async with aiohttp.ClientSession() as session:
+        for instance in PIPED_INSTANCES:
+            try:
+                async with session.get(f"{instance}/search", params={"q": query, "filter": "videos"}, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        items = data.get("items", [])
+                        if items:
+                            video = items[0]
+                            video_id = video.get("url", "").replace("/watch?v=", "")
+                            return video_id
+            except:
+                continue
+    return None
 
 class YTDLSource(discord.PCMVolumeTransformer):
     def __init__(self, source, *, data, requester, volume=0.5):
@@ -83,6 +166,7 @@ class MusicPlayer:
         self.playlist = []
         self.index = -1
         self.current = None
+        self.current_data = None
         self.volume = 0.5
         self.is_playing = False
 
@@ -93,14 +177,25 @@ class MusicPlayer:
             
         track_data = self.playlist[self.index]
         try:
-            source_dict = await YTDLSource.from_url(
-                track_data["url"], 
-                loop=self.bot.loop, 
-                stream=True, 
-                requester=track_data["requester"]
-            )
-            self.current = source_dict["source"]
-            self.current.volume = self.volume
+            video_id = track_data.get("video_id")
+            audio_url = track_data.get("url")
+            
+            if video_id and not audio_url:
+                data = await get_audio_from_piped(video_id)
+                if not data:
+                    data = await get_audio_from_invidious(video_id)
+                if data:
+                    audio_url = data.get("url")
+                    track_data["url"] = audio_url
+            
+            if not audio_url:
+                await self.channel.send(f"❌ Không thể lấy audio cho bài hát này!")
+                self.play_next_event(None)
+                return
+            
+            source = discord.FFmpegPCMAudio(audio_url, executable=FFMPEG_PATH, **FFMPEG_OPTIONS)
+            self.current = discord.PCMVolumeTransformer(source, volume=self.volume)
+            self.current_data = track_data
             
             if self.guild.voice_client is None:
                 self.is_playing = False
@@ -132,19 +227,19 @@ class MusicPlayer:
             self.is_playing = False
 
     def build_embed(self):
-        if self.current is None:
+        if self.current_data is None:
             return discord.Embed(title="Music Player", description="Không có bài hát", color=0x5B2C83)
             
-        duration = self.current.duration or 0
+        duration = self.current_data.get("duration", 0) or 0
         dur = f"{duration // 60}:{duration % 60:02d}"
         e = discord.Embed(title="🎵 Music Player", color=0x5B2C83)
-        e.description = f"**[{self.current.title}]({self.current.web_url})**"
+        e.description = f"**[{self.current_data.get('title', 'Unknown')}]({self.current_data.get('webpage_url', '')})**"
         e.add_field(name="⏱ Thời lượng", value=dur, inline=True)
         e.add_field(name="🔊 Âm lượng", value=f"{int(self.volume * 100)}%", inline=True)
-        e.add_field(name="👤 Người gọi bài", value=self.current.requester.display_name, inline=True)
+        e.add_field(name="👤 Người gọi bài", value=self.current_data.get("requester").display_name, inline=True)
         e.add_field(name="📋 Vị trí", value=f"{self.index + 1}/{len(self.playlist)}", inline=True)
-        if self.current.thumbnail:
-            e.set_image(url=self.current.thumbnail)
+        if self.current_data.get("thumbnail"):
+            e.set_image(url=self.current_data.get("thumbnail"))
         return e
 
 class ControlView(discord.ui.View):
@@ -239,24 +334,32 @@ async def play(interaction: discord.Interaction, search: str):
         player = players[interaction.guild.id]
         player.channel = interaction.channel
         
-        data = await bot.loop.run_in_executor(None, lambda: ytdl.extract_info(search, download=False))
+        video_id = extract_video_id(search)
         
-        if data is None:
-            return await interaction.followup.send("❌ Không tìm thấy bài hát!")
-            
-        if "entries" in data:
-            data = data["entries"][0]
+        if not video_id:
+            video_id = await search_youtube_piped(search)
         
-        if data is None:
+        if not video_id:
             return await interaction.followup.send("❌ Không tìm thấy bài hát!")
         
-        url = data.get("webpage_url") or data.get("url")
+        data = await get_audio_from_piped(video_id)
+        
+        if not data:
+            data = await get_audio_from_invidious(video_id)
+        
+        if not data or not data.get("url"):
+            return await interaction.followup.send("❌ Không thể lấy audio từ video này!")
+        
         title = data.get("title", "Unknown")
         
         player.playlist.append({
-            "url": url, 
-            "title": title, 
-            "requester": interaction.user
+            "url": data.get("url"),
+            "title": title,
+            "duration": data.get("duration", 0),
+            "thumbnail": data.get("thumbnail"),
+            "webpage_url": data.get("webpage_url"),
+            "requester": interaction.user,
+            "video_id": video_id
         })
         
         await interaction.followup.send(f"✅ Đã thêm **{title}** vào playlist! (Vị trí: {len(player.playlist)})")
