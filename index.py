@@ -65,7 +65,41 @@ def extract_video_id(url_or_search):
         if match:
             return match.group(1)
     return None
+def extract_playlist_id(url):
+    match = re.search(r'[?&]list=([a-zA-Z0-9_-]+)', url)
+    return match.group(1) if match else None
 
+async def get_playlist_tracks(playlist_id, loop):
+    playlist_opts = {
+        "extract_flat": True,  
+        "dump_single_json": True,
+        "ignoreerrors": True,
+        "quiet": True,
+        "nocheckcertificate": True,
+    }
+    
+    url = f"https://www.youtube.com/playlist?list={playlist_id}"
+    
+    try:
+        with yt_dlp.YoutubeDL(playlist_opts) as ydl:
+            print(f"Fetching playlist: {url}")
+            data = await loop.run_in_executor(None, lambda: ydl.extract_info(url, download=False))
+            if data and 'entries' in data:
+                tracks = []
+                for entry in data['entries']:
+                    if entry and entry.get('id') and entry.get('title') != '[Private video]':
+                        tracks.append({
+                            "video_id": entry.get('id'),
+                            "title": entry.get('title', 'Unknown'),
+                            "duration": entry.get('duration', 0),
+                            "thumbnail": None, 
+                            "webpage_url": f"https://www.youtube.com/watch?v={entry.get('id')}",
+                            "url": None 
+                        })
+                return tracks, data.get('title', 'Playlist')
+    except Exception as e:
+        print(f"Error fetching playlist: {e}")
+    return None, None
 async def get_audio_from_ytdlp(url_or_id, loop):
     try:
         ytdl_opts = {
@@ -374,8 +408,8 @@ bot = MusicBot()
 async def on_ready():
     print(f"Logged in as {bot.user}")
 
-@bot.tree.command(name="play", description="Phát nhạc từ YouTube")
-@app_commands.describe(search="Tên bài hát hoặc URL YouTube")
+@bot.tree.command(name="play", description="Phát nhạc từ YouTube (Hỗ trợ Playlist)")
+@app_commands.describe(search="Tên bài hát, URL Video hoặc URL Playlist")
 async def play(interaction: discord.Interaction, search: str):
     try:
         await interaction.response.defer()
@@ -394,7 +428,23 @@ async def play(interaction: discord.Interaction, search: str):
 
         player = players[interaction.guild.id]
         player.channel = interaction.channel
-        
+        playlist_id = extract_playlist_id(search)
+        if playlist_id:
+            tracks, playlist_title = await get_playlist_tracks(playlist_id, bot.loop)
+            if tracks:
+                for track in tracks:
+                    track["requester"] = interaction.user
+                    player.playlist.append(track)
+                
+                await interaction.followup.send(f"✅ Đã thêm **{len(tracks)}** bài từ playlist **{playlist_title}**!")
+                
+                if not player.is_playing:
+
+                    player.index = len(player.playlist) - len(tracks)
+                    await player.play_current()
+                return 
+            else:
+                await interaction.followup.send("⚠️ Không tìm thấy bài hát nào trong Playlist hoặc lỗi định dạng.")
         video_id = extract_video_id(search)
         
         if not video_id:
@@ -404,20 +454,23 @@ async def play(interaction: discord.Interaction, search: str):
             return await interaction.followup.send("❌ Không tìm thấy bài hát!")
         
         print(f"Found video_id: {video_id}")
-        
+    
         data = await get_audio_from_piped(video_id)
         
         if not data:
-            print("Piped failed, trying Invidious...")
             data = await get_audio_from_invidious(video_id)
-        
         if not data:
-            print("Invidious failed, trying yt-dlp...")
             data = await get_audio_from_ytdlp(video_id, bot.loop)
         
-        if not data or not data.get("url"):
-            return await interaction.followup.send("❌ Không thể lấy audio từ video này!")
-        
+        if not data: 
+             data = {
+                 "url": None,
+                 "title": "Loading...",
+                 "duration": 0,
+                 "thumbnail": f"https://img.youtube.com/vi/{video_id}/hqdefault.jpg",
+                 "webpage_url": f"https://www.youtube.com/watch?v={video_id}"
+             }
+
         title = data.get("title", "Unknown")
         
         player.playlist.append({
@@ -437,10 +490,11 @@ async def play(interaction: discord.Interaction, search: str):
             await player.play_current()
             
     except Exception as e:
+        print(f"Error in play command: {e}")
         try:
             await interaction.followup.send(f"❌ Lỗi: {str(e)}")
         except:
-            print(f"Error: {e}")
+            pass
 
 @bot.tree.command(name="skip", description="Bỏ qua bài hát hiện tại")
 async def skip(interaction: discord.Interaction):
